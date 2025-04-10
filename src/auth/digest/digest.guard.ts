@@ -16,72 +16,78 @@ export class DigestGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const response = context.switchToHttp().getResponse();
 
+    // Get the authorization header
     const authHeader = request.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Digest ')) {
-      this.sendUnauthorized(response);
+      this.challengeClient(response);
       return false;
     }
 
-    const authParams = this.parseDigestHeader(authHeader);
+    // Parse the authorization header
+    const digestParts = this.parseDigestAuth(authHeader);
 
-    if (!this.validateDigestRequest(authParams)) {
-      this.sendUnauthorized(response);
+    // Verify username
+    if (digestParts.username !== this.username) {
+      this.challengeClient(response);
+      return false;
+    }
+
+    // Calculate the expected response
+    const ha1 = crypto
+      .createHash('md5')
+      .update(`${this.username}:${this.realm}:${this.password}`)
+      .digest('hex');
+    const ha2 = crypto
+      .createHash('md5')
+      .update(`${request.method}:${digestParts.uri}`)
+      .digest('hex');
+
+    let expectedResponse;
+    if (digestParts.qop) {
+      expectedResponse = crypto
+        .createHash('md5')
+        .update(
+          `${ha1}:${digestParts.nonce}:${digestParts.nc}:${digestParts.cnonce}:${digestParts.qop}:${ha2}`,
+        )
+        .digest('hex');
+    } else {
+      expectedResponse = crypto
+        .createHash('md5')
+        .update(`${ha1}:${digestParts.nonce}:${ha2}`)
+        .digest('hex');
+    }
+
+    if (digestParts.response !== expectedResponse) {
+      this.challengeClient(response);
       return false;
     }
 
     return true;
   }
 
-  private parseDigestHeader(authHeader: string): Record<string, string> {
-    const parts = authHeader.substring(7).split(',');
-    const params: Record<string, string> = {};
+  private parseDigestAuth(authHeader: string): any {
+    const digestString = authHeader.substr(7);
+    const parts = digestString.split(',');
+    const digestParts: any = {};
 
-    parts.forEach((part) => {
+    for (const part of parts) {
       const [key, value] = part.trim().split('=');
-      params[key] = value.replace(/"/g, '');
-    });
-
-    return params;
-  }
-
-  private validateDigestRequest(params: Record<string, string>): boolean {
-    if (params.username !== this.username) {
-      return false;
+      digestParts[key] = value.replace(/"/g, '');
     }
 
-    // HA1 = MD5(username:realm:password)
-    const ha1 = crypto
-      .createHash('md5')
-      .update(`${this.username}:${this.realm}:${this.password}`)
-      .digest('hex');
-
-    // HA2 = MD5(method:digestURI)
-    const ha2 = crypto
-      .createHash('md5')
-      .update(`${params.method}:${params.uri}`)
-      .digest('hex');
-
-    // Response = MD5(HA1:nonce:nonceCount:cnonce:qop:HA2)
-    const expectedResponse = crypto
-      .createHash('md5')
-      .update(
-        `${ha1}:${params.nonce}:${params.nc}:${params.cnonce}:${params.qop}:${ha2}`,
-      )
-      .digest('hex');
-
-    return expectedResponse === params.response;
+    return digestParts;
   }
 
-  private sendUnauthorized(response: any): void {
+  private challengeClient(response: any): void {
     const nonce = crypto.randomBytes(16).toString('hex');
-    const opaque = crypto.randomBytes(16).toString('hex');
+    const opaque = crypto.randomBytes(8).toString('hex');
 
-    response.header(
+    response.setHeader(
       'WWW-Authenticate',
-      `Digest realm="${this.realm}", qop="auth", nonce="${nonce}", opaque="${opaque}"`,
+      `Digest realm="${this.realm}", qop="auth", algorithm=MD5, nonce="${nonce}", opaque="${opaque}"`,
     );
 
-    throw new UnauthorizedException();
+    throw new UnauthorizedException('Digest authentication required');
   }
 }
