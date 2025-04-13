@@ -1,4 +1,5 @@
 export class CreateSaleDto {
-  id: string;
-  quantity: number;
+  name: string;
+  amount?: number;
+  price?: number;
 }
